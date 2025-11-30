@@ -1,0 +1,9 @@
+<resources>
+    <!-- Tema basado en Material3 (descendiente de AppCompat) -->
+    <style name="Theme.Routemap" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Colores opcionales si ya tienes color.xml -->
+        <!-- <item name="colorPrimary">@color/your_primary</item> -->
+        <!-- <item name="colorSecondary">@color/your_secondary</item> -->
+        <item name="android:statusBarColor">?attr/colorPrimary</item>
+    </style>
+</resources>
