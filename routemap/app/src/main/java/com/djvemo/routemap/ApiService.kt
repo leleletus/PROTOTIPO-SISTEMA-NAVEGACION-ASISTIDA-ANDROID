@@ -10,8 +10,10 @@ interface ApiService {
     suspend fun getRoute(
         @Path("profile") profile: String,
         @Query("api_key") key: String,
-        @Query("start", encoded = true) start: String, // "lon,lat"
-        @Query("end", encoded = true) end: String,     // "lon,lat"
-        @Query("geometry_format") geometryFormat: String = "geojson"
+        @Query("start", encoded = true) start: String,
+        @Query("end", encoded = true) end: String,
+        @Query("geometry_format") geometryFormat: String = "geojson",
+        // AGREGA ESTA LÍNEA PARA PEDIR ESPAÑOL:
+        @Query("language") language: String = "es"
     ): Response<RouteResponse>
 }

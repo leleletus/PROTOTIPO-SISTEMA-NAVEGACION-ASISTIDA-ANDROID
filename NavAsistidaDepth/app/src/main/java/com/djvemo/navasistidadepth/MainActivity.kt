@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -15,13 +16,9 @@ import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
-import com.google.ar.core.exceptions.NotYetAvailableException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.util.LinkedList
-import java.util.Locale
-import java.util.Queue
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -29,26 +26,28 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     private lateinit var surfaceView: GLSurfaceView
     private lateinit var tvDistancia: TextView
-    private lateinit var tvLatencia: TextView
+    private lateinit var tvLog: TextView
     private lateinit var ivMapaCalor: ImageView
 
     private var session: Session? = null
     private var installRequested = false
-    private var esSoportado = false
-
     private val cameraRenderer = CameraRenderer()
-    private val filtroEstabilizador = PromedioMovil(tamanoVentana = 5)
-    private var visualizerFrameCounter = 0
 
-    // Buffer de vértices de la pantalla (Cuadrado normalizado)
-    private val localQuadVertices: FloatBuffer = ByteBuffer.allocateDirect(12 * 4)
+    // Definimos los vértices del cuadrado (2D: X, Y)
+    // 4 vértices * 2 coordenadas * 4 bytes = 32 bytes
+    private val localQuadVertices: FloatBuffer = ByteBuffer.allocateDirect(32)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
-            put(floatArrayOf(-1.0f, -1.0f, 0.0f, -1.0f, +1.0f, 0.0f, +1.0f, -1.0f, 0.0f, +1.0f, +1.0f, 0.0f))
+            put(floatArrayOf(
+                -1.0f, -1.0f, // Abajo-Izq
+                -1.0f, +1.0f, // Arriba-Izq
+                +1.0f, -1.0f, // Abajo-Der
+                +1.0f, +1.0f  // Arriba-Der
+            ))
             position(0)
         }
 
-    // Buffer donde ARCore guardará las coordenadas corregidas
-    private val transformedTexCoords: FloatBuffer = ByteBuffer.allocateDirect(8 * 4)
+    // Buffer para recibir las coordenadas de textura corregidas
+    private val transformedTexCoords: FloatBuffer = ByteBuffer.allocateDirect(32)
         .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,27 +55,46 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         setContentView(R.layout.activity_main)
 
         tvDistancia = findViewById(R.id.tvDistancia)
-        tvLatencia = findViewById(R.id.tvLatencia)
+        tvLog = findViewById(R.id.tvLog)
         surfaceView = findViewById(R.id.surfaceView)
         ivMapaCalor = findViewById(R.id.ivMapaCalor)
+
+        log("onCreate: Iniciando (Fix Rebobinado)...")
 
         surfaceView.preserveEGLContextOnPause = true
         surfaceView.setEGLContextClientVersion(2)
         surfaceView.setEGLConfigChooser(8, 8, 8, 8, 16, 0)
         surfaceView.setRenderer(this)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-        surfaceView.setWillNotDraw(false)
 
-        actualizarUI("Cargando...", 0.0)
-
-        if (!tienePermisoCamara()) {
-            pedirPermisoCamara()
-        }
+        if (!tienePermisoCamara()) pedirPermisoCamara()
     }
 
     override fun onResume() {
         super.onResume()
-        if (tienePermisoCamara()) surfaceView.onResume()
+        if (session == null) {
+            try {
+                if (ArCoreApk.getInstance().requestInstall(this, !installRequested) == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
+                    installRequested = true
+                    return
+                }
+                session = Session(this)
+                val config = Config(session)
+                // Verificamos soporte de Depth
+                if (session!!.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                    config.depthMode = Config.DepthMode.AUTOMATIC
+                    log("Depth: ACTIVADO (Auto)")
+                } else {
+                    log("Depth: NO SOPORTADO")
+                }
+                session!!.configure(config)
+            } catch (e: Exception) {
+                log("Error Session: ${e.message}")
+                return
+            }
+        }
+        try { session!!.resume() } catch (e: Exception) { log("Error Resume: ${e.message}") }
+        surfaceView.onResume()
     }
 
     override fun onPause() {
@@ -86,130 +104,97 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
-        cameraRenderer.createOnGlThread(this)
-
+        GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
         try {
-            if (session == null) {
-                when (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
-                    ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
-                        installRequested = true
-                        return
-                    }
-                    ArCoreApk.InstallStatus.INSTALLED -> {}
-                }
-                session = Session(this)
-            }
-            val configAr = Config(session)
-            esSoportado = session!!.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
-            if (esSoportado) configAr.depthMode = Config.DepthMode.AUTOMATIC
-            session!!.configure(configAr)
-            session!!.resume()
-            session!!.setCameraTextureName(cameraRenderer.getTextureId())
-        } catch (_: Exception) { }
+            cameraRenderer.createOnGlThread(this)
+            session?.setCameraTextureName(cameraRenderer.getTextureId())
+        } catch (e: Exception) { log("Error Renderer: ${e.message}") }
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
-        session?.setDisplayGeometry(0, width, height)
+        val rotation = getSystemService(WindowManager::class.java).defaultDisplay.rotation
+        session?.setDisplayGeometry(rotation, width, height)
     }
 
     override fun onDrawFrame(gl: GL10?) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-        if (!esSoportado || session == null) return
+        if (session == null) return
 
         try {
-            val tiempoInicio = System.nanoTime()
+            session!!.setCameraTextureName(cameraRenderer.getTextureId())
             val frame = session!!.update()
 
-            // 1. Corrección Geométrica (Para que no se vea estirado ni espejo)
-            try {
-                frame.transformCoordinates2d(
-                    Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
-                    localQuadVertices,
-                    Coordinates2d.TEXTURE_NORMALIZED,
-                    transformedTexCoords
-                )
-                cameraRenderer.updateTextureCoordinates(transformedTexCoords)
-            } catch (_: Exception) {}
+            // ---------------------------------------------------------
+            // <--- CORRECCIÓN CRÍTICA: REBOBINAR BUFFERS --->
+            // Si no hacemos esto, position() está al final y ARCore lee 0 bytes.
+            localQuadVertices.position(0)
+            transformedTexCoords.position(0)
+            // ---------------------------------------------------------
 
-            // 2. Dibujar Cámara Real
+            frame.transformCoordinates2d(
+                Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                localQuadVertices,
+                Coordinates2d.TEXTURE_NORMALIZED,
+                transformedTexCoords
+            )
+
+            cameraRenderer.updateTextureCoordinates(transformedTexCoords)
             cameraRenderer.draw()
 
-            if (frame.camera.trackingState != TrackingState.TRACKING) {
-                actualizarUI("Mueve el celular", 0.0)
-                return
-            }
+            // 2. Procesar Profundidad
+            if (frame.camera.trackingState == TrackingState.TRACKING) {
+                try {
+                    val depthImage = frame.acquireDepthImage16Bits()
 
-            try {
-                // 3. Obtener Profundidad
-                val depthImage = frame.acquireDepthImage16Bits()
+                    // Calculo
+                    val cx = depthImage.width / 2
+                    val cy = depthImage.height / 2
+                    val resultado = DepthCalculator.obtenerDistanciaPromedio(depthImage, cx, cy)
 
-                // Cálculo de Distancia Central (Numérico)
-                val centroX = depthImage.width / 2
-                val centroY = depthImage.height / 2
-                val resultadoCrudo = DepthCalculator.obtenerDistancia(depthImage, centroX, centroY)
-                val distanciaEstable = filtroEstabilizador.agregarValor(resultadoCrudo.distanciaMetros)
+                    // Visualización
+                    val bitmap = DepthVisualizer.generarMapaCalor(depthImage)
 
-                // 4. VISUALIZACIÓN TÉRMICA (Estilo Unity)
-                // Usamos la nueva función suave.
-                // Quitamos el contador de frames para que sea FLUIDO (como en el video).
-                val bitmapColores = DepthVisualizer.generarMapaCalorSuave(depthImage)
+                    depthImage.close()
 
-                if (bitmapColores != null) {
                     runOnUiThread {
-                        ivMapaCalor.rotation = 0f
-                        ivMapaCalor.setImageBitmap(bitmapColores)
+                        if (bitmap != null) {
+                            // YA NO ROTAMOS EL IMAGEVIEW, porque el bitmap ya viene derecho
+                            ivMapaCalor.setImageBitmap(bitmap)
+
+                            // Solo aseguramos que llene la pantalla
+                            ivMapaCalor.rotation = 0f
+                            ivMapaCalor.scaleType = ImageView.ScaleType.FIT_XY
+                            ivMapaCalor.scaleX = 1f
+                            ivMapaCalor.scaleY = 1f
+                        }
+
+                        tvDistancia.text = "%.2f m\n%s".format(resultado.distanciaMetros, resultado.mensaje)
+
+                        if(resultado.distanciaMetros > 0 && resultado.distanciaMetros < 1.2) {
+                            tvDistancia.setTextColor(0xFFFF0000.toInt()) // Rojo
+                            // Opcional: Vibrar aquí si quisieras
+                        } else {
+                            tvDistancia.setTextColor(0xFFFFFFFF.toInt()) // Blanco
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Ignoramos NotYetAvailable, logueamos el resto
+                    if (e !is com.google.ar.core.exceptions.NotYetAvailableException) {
+                        log("Depth Error: ${e.message}")
                     }
                 }
-
-                depthImage.close()
-
-                // Actualizar Textos
-                val tiempoFin = System.nanoTime()
-                val latenciaMs = (tiempoFin - tiempoInicio) / 1_000_000.0
-                val mensajeEstado = if (distanciaEstable < 1.0) "¡PELIGRO!" else if (distanciaEstable < 3.0) "Cercano" else "Lejano"
-                val textoDistancia = String.format(Locale.US, "%.2f m\n%s", distanciaEstable, mensajeEstado)
-
-                actualizarUI(textoDistancia, latenciaMs)
-
-            } catch (_: NotYetAvailableException) { }
-
-        } catch (_: Exception) { }
-    }
-
-    private fun actualizarUI(textoDist: String, latencia: Double) {
-        runOnUiThread {
-            tvDistancia.text = textoDist
-            if (latencia > 0) {
-                tvLatencia.text = String.format(Locale.US, "Latencia: %.1f ms", latencia)
             }
+        } catch (t: Throwable) {
+            log("CRASH: ${t.message}")
+            t.printStackTrace()
         }
     }
 
-    private fun tienePermisoCamara(): Boolean {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    private fun log(msg: String) {
+        runOnUiThread { tvLog.append("\n$msg") }
     }
-    private fun pedirPermisoCamara() {
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 0)
-    }
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (!tienePermisoCamara()) finish()
-    }
-}
 
-class PromedioMovil(private val tamanoVentana: Int) {
-    private val cola: Queue<Float> = LinkedList()
-    private var suma: Float = 0f
-    fun agregarValor(valor: Float): Float {
-        if (valor == 0f) return if (cola.isNotEmpty()) suma / cola.size else 0f
-        cola.add(valor)
-        suma += valor
-        if (cola.size > tamanoVentana) {
-            val eliminado = cola.remove()
-            suma -= eliminado
-        }
-        return suma / cola.size
-    }
+    private fun tienePermisoCamara() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    private fun pedirPermisoCamara() = ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 0)
 }

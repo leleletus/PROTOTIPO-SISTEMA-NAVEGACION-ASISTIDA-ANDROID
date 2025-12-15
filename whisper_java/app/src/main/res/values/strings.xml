@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">WhisperASR</string>
+    <string name="transcribe">Transcribe</string>
+    <string name="translate">Traduce</string>
+    <string name="record">Graba</string>
+    <string name="play">Reproduce</string>
+    <string name="processing">Procesando...</string>
+    <string name="stop">Detener</string>
+    <string name="need_record_audio_permission">"Esta aplicación necesita el permiso de RECORD_AUDIO"</string>
+</resources>

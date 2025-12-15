@@ -1,4 +1,4 @@
-person
+persona
 bicicleta
 carro
 motocicleta

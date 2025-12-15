@@ -1,51 +1,68 @@
 package com.djvemo.navasistidadepth
 
 import android.media.Image
+import java.nio.ByteOrder
 
-/**
- * Módulo de Matemáticas para la Tesis.
- * Versión Final - Limpia
- */
 object DepthCalculator {
 
-    private const val RANGO_PELIGRO = 1.0f
-    private const val RANGO_CERCANO = 3.0f
+    data class Resultado(val distanciaMetros: Float, val mensaje: String)
 
-    data class Resultado(
-        val distanciaMetros: Float,
-        val mensaje: String
-    )
-
-    fun obtenerDistancia(depthImage: Image, x: Int, y: Int): Resultado {
+    fun obtenerDistanciaPromedio(depthImage: Image, xCentral: Int, yCentral: Int): Resultado {
         try {
-            if (x < 0 || x >= depthImage.width || y < 0 || y >= depthImage.height) {
-                return Resultado(0f, "Fuera de rango")
-            }
-
             val plane = depthImage.planes[0]
-            val byteBuffer = plane.buffer.asShortBuffer()
-            val index = (y * depthImage.width) + x
-            val rawDepth = byteBuffer.get(index).toInt()
+            val rowStride = plane.rowStride
+            val pixelStride = plane.pixelStride
+            val buffer = plane.buffer.order(ByteOrder.nativeOrder())
 
-            // Mascara 0x1FFF para obtener solo los 13 bits de distancia
-            val depthMillimeters = rawDepth and 0x1FFF
-            val distanciaMetros = depthMillimeters / 1000.0f
+            // Como el Visualizer rota la imagen visual, las coordenadas X/Y visuales
+            // no coinciden con la memoria RAW (que sigue acostada).
+            // TRUCO: Intercambiamos X e Y para leer la memoria correctamente
+            // Imagen RAW (Landscape): Ancho=160, Alto=120
+            // Pantalla (Portrait): Ancho=ScreenW, Alto=ScreenH
+            // El centro es el centro, así que usamos width/2 y height/2 de la imagen RAW.
 
-            if (distanciaMetros == 0f) {
-                return Resultado(0f, "Calculando...")
+            val rawCenterX = depthImage.width / 2
+            val rawCenterY = depthImage.height / 2
+
+            // Kernel de promedio 5x5
+            var suma = 0L
+            var cuenta = 0
+            val radio = 4
+
+            for (ry in -radio..radio) {
+                for (rx in -radio..radio) {
+                    val px = rawCenterX + rx
+                    val py = rawCenterY + ry
+
+                    if (px in 0 until depthImage.width && py in 0 until depthImage.height) {
+                        // CALCULO CORRECTO DE POSICIÓN EN MEMORIA
+                        val offset = (py * rowStride) + (px * pixelStride)
+
+                        val byteLow = buffer.get(offset).toInt() and 0xFF
+                        val byteHigh = buffer.get(offset + 1).toInt() and 0xFF
+                        val depthMm = ((byteHigh shl 8) or byteLow) and 0x1FFF
+
+                        if (depthMm > 0 && depthMm < 8000) {
+                            suma += depthMm
+                            cuenta++
+                        }
+                    }
+                }
             }
 
-            val texto = when {
-                distanciaMetros < RANGO_PELIGRO -> "¡PELIGRO! MUY CERCA"
-                distanciaMetros < RANGO_CERCANO -> "Atención: Objeto Cercano"
-                else -> "Despejado (Lejano)"
+            if (cuenta == 0) return Resultado(0f, "Buscando...")
+
+            val promedioM = (suma / cuenta) / 1000.0f
+
+            val msg = when {
+                promedioM < 1.0 -> "¡DETENTE!"
+                promedioM < 2.5 -> "Cuidado"
+                else -> "Libre"
             }
+            return Resultado(promedioM, msg)
 
-            return Resultado(distanciaMetros, texto)
-
-        } catch (_: Exception) {
-            // El guion bajo silencia el warning correctamente
-            return Resultado(0f, "Error de lectura")
+        } catch (e: Exception) {
+            return Resultado(0f, "Error")
         }
     }
 }

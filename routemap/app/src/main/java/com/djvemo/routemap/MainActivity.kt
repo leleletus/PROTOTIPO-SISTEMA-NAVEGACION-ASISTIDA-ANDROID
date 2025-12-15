@@ -17,6 +17,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
@@ -98,6 +99,20 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         if (hasLocationPermission()) {
             try {
                 map.isMyLocationEnabled = true
+
+                // --- INICIO DEL CAMBIO PARA ZOOM AUTOMÁTICO ---
+                // Obtenemos la última ubicación conocida para centrar el mapa al iniciar
+                fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                    if (location != null) {
+                        val latLng = LatLng(location.latitude, location.longitude)
+                        // Zoom 18f es nivel "calle/caminata".
+                        // 15f es barrio, 20f es edificios.
+                        val update = CameraUpdateFactory.newLatLngZoom(latLng, 200f)
+                        map.moveCamera(update)
+                    }
+                }
+                // --- FIN DEL CAMBIO ---
+
             } catch (se: SecurityException) {
                 Log.e("RouteMap", "SecurityException al habilitar ubicación: ${se.message}")
             }
@@ -176,7 +191,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     key = ORS_API_KEY,
                     start = start,
                     end = end,
-                    geometryFormat = "geojson"
+                    geometryFormat = "geojson",
+                    language = "es" // Forzamos español aquí también
                 )
 
                 if (response.isSuccessful) {
@@ -259,9 +275,80 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             ?.steps ?: emptyList()
 
         for (step in steps) {
-            val texto = "${step.instruction}, en ${step.distance.toInt()} metros."
+            // AQUI ESTÁ EL TRUCO: Traducimos antes de armar la frase
+            val instruccionTraducida = traducirInstruccion(step.instruction)
+
+            val texto = "$instruccionTraducida, en ${step.distance.toInt()} metros."
             speak(texto)
         }
+    }
+
+    // Agrega esta nueva función al final de tu MainActivity para hacer la magia
+    private fun traducirInstruccion(textoIngles: String): String {
+        var texto = textoIngles
+
+        // 1. LIMPIEZA INICIAL DE CONECTORES COMPUESTOS (Importante el orden)
+        // "onto" debe ir antes que "on" para no romperlo
+        texto = texto.replace(" onto ", " hacia ", ignoreCase = true)
+
+        // AQUÍ ESTÁ EL ARREGLO PARA TU PROBLEMA ACTUAL:
+        // Reemplazamos " on " (con espacios) por " por "
+        texto = texto.replace(" on ", " por ", ignoreCase = true)
+
+        texto = texto.replace(" then ", " y luego ", ignoreCase = true)
+        texto = texto.replace(" at ", " en ", ignoreCase = true)
+        texto = texto.replace(" towards ", " hacia ", ignoreCase = true)
+
+        // 2. DIRECCIONES CARDINALES
+        texto = texto.replace("North", "Norte", ignoreCase = true)
+        texto = texto.replace("South", "Sur", ignoreCase = true)
+        texto = texto.replace("East", "Este", ignoreCase = true)
+        texto = texto.replace("West", "Oeste", ignoreCase = true)
+
+        // Variantes compuestas
+        texto = texto.replace("Northeast", "Noreste", ignoreCase = true)
+        texto = texto.replace("Northwest", "Noroeste", ignoreCase = true)
+        texto = texto.replace("Southeast", "Sureste", ignoreCase = true)
+        texto = texto.replace("Southwest", "Suroeste", ignoreCase = true)
+
+        // 3. INSTRUCCIONES DE GIRO
+        if (texto.contains("Turn right", ignoreCase = true)) {
+            texto = texto.replace("Turn right", "Gira a la derecha", ignoreCase = true)
+        }
+        if (texto.contains("Turn left", ignoreCase = true)) {
+            texto = texto.replace("Turn left", "Gira a la izquierda", ignoreCase = true)
+        }
+
+        // Giros suaves/cerrados
+        texto = texto.replace("slight right", "ligeramente a la derecha", ignoreCase = true)
+        texto = texto.replace("slight left", "ligeramente a la izquierda", ignoreCase = true)
+        texto = texto.replace("sharp right", "cerradamente a la derecha", ignoreCase = true)
+        texto = texto.replace("sharp left", "cerradamente a la izquierda", ignoreCase = true)
+
+        // MANTENERSE
+        if (texto.contains("Keep right", ignoreCase = true)) {
+            texto = texto.replace("Keep right", "Mantente a la derecha", ignoreCase = true)
+        }
+        if (texto.contains("Keep left", ignoreCase = true)) {
+            texto = texto.replace("Keep left", "Mantente a la izquierda", ignoreCase = true)
+        }
+        if (texto.contains("Keep straight", ignoreCase = true)) {
+            texto = texto.replace("Keep straight", "Sigue derecho", ignoreCase = true)
+        }
+
+        // 4. COMANDOS DE INICIO/FIN
+        // "Head" a veces queda mejor como "Ve" o "Dirígete"
+        if (texto.contains("Head", ignoreCase = true)) {
+            texto = texto.replace("Head", "Dirígete", ignoreCase = true)
+        }
+        if (texto.contains("Arrive", ignoreCase = true)) {
+            texto = "Has llegado a tu destino"
+        }
+        if (texto.contains("You have reached", ignoreCase = true)) {
+            texto = "Has llegado a"
+        }
+
+        return texto
     }
 
     private fun speak(text: String) {

@@ -3,137 +3,234 @@ package com.djvemo.smartmoves
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.djvemo.smartmoves.ml.DetectionResult
-import com.djvemo.smartmoves.ml.Overlay
-import com.djvemo.smartmoves.ml.YoloSegHelper
-import org.tensorflow.lite.Interpreter
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+// Definición de Colores de tu diseño
+val SmartPurpleHeader = Color(0xFFB368F5)
+val SmartBlueSearch = Color(0xFF15469F)
+val SmartBgMain = Color(0xFF5C6BC0)
+
 class MainActivity : ComponentActivity() {
-
-    private val requestPerm =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-            if (!ok) Toast.makeText(this, "Se necesita permiso de cámara", Toast.LENGTH_LONG).show()
-        }
-
-    private lateinit var interpreter: Interpreter
+    private lateinit var cameraExecutor: ExecutorService
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestCameraPermission()
-
-        // Cargar labels y modelo (EN assets/)
-        YoloSegHelper.loadLabels(this, "labels.txt")
-        // Si te crashea con GPU en tu equipo, pon useGpu=false
-        interpreter = YoloSegHelper.createInterpreter(this, "yolo11n_seg_best_float32.tflite", useGpu = true)
-
-        // (Opcional) Ajusta umbrales por defecto
-        // YoloSegHelper.setThresholds(conf = 0.35f, iou = 0.50f, mask = 0.50f)
+        cameraExecutor = Executors.newSingleThreadExecutor()
 
         setContent {
-            MaterialTheme {
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    MainScreen(interpreter)
-                }
-            }
-        }
-    }
-
-    private fun requestCameraPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED) {
-            requestPerm.launch(Manifest.permission.CAMERA)
+            // Aquí inicia la UI de Compose
+            SmartMovesApp(cameraExecutor)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try { interpreter.close() } catch (_: Throwable) {}
-        YoloSegHelper.close() // cierra el delegate GPU si existe
+        cameraExecutor.shutdown()
     }
 }
 
 @Composable
-fun MainScreen(interpreter: Interpreter) {
-    val ctx = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var detections by remember { mutableStateOf(emptyList<DetectionResult>()) }
-    var latency by remember { mutableStateOf(0L) }
-
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(ctx) }
-    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
-
-    Box(Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { context ->
-                val pv = PreviewView(context).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                }
-
-                val preview = Preview.Builder()
-                    .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                    .build()
-                    .also { it.setSurfaceProvider(pv.surfaceProvider) }
-
-                val analyzer = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .build()
-                    .also { ia ->
-                        ia.setAnalyzer(analysisExecutor) { imageProxy ->
-                            // Inferencia + postproceso
-                            YoloSegHelper.analyzeImageProxy(
-                                image = imageProxy,
-                                interpreter = interpreter
-                            ) { results, totalMs, _, _ ->
-                                detections = results
-                                latency = totalMs // latencia total (pre+infer+post)
-                            }
-                        }
-                    }
-
-                cameraProviderFuture.addListener({
-                    val provider = cameraProviderFuture.get()
-                    try {
-                        provider.unbindAll()
-                        provider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            analyzer
-                        )
-                    } catch (e: Exception) {
-                        Log.e("CameraX", "bind error", e)
-                    }
-                }, ContextCompat.getMainExecutor(context))
-
-                pv
-            },
-            modifier = Modifier.fillMaxSize()
+fun SmartMovesApp(cameraExecutor: ExecutorService) {
+    val context = LocalContext.current
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         )
-
-        // Dibuja cajas, máscaras, etiquetas y latencia
-        Overlay(detections = detections, inferenceMs = latency)
     }
+
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            hasCameraPermission = granted
+            if (!granted) Toast.makeText(context, "Permiso requerido", Toast.LENGTH_SHORT).show()
+        }
+    )
+
+    // Pedir permiso al iniciar si no lo tiene
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) {
+            launcher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // Estructura Principal (Columna Vertical)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(SmartBgMain)
+    ) {
+        // 1. HEADER
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SmartPurpleHeader)
+                .padding(vertical = 20.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "SmartMoves",
+                color = Color.White,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+                fontStyle = FontStyle.Italic,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Serif
+            )
+        }
+
+        // 2. BARRA DE BÚSQUEDA
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SmartBlueSearch)
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Ingresar ruta a seguir:",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                fontStyle = FontStyle.Italic,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(
+                imageVector = Icons.Default.Search,
+                contentDescription = "Buscar",
+                tint = Color.White,
+                modifier = Modifier.size(32.dp)
+            )
+        }
+
+        // 3. CONTROLES
+        Column(modifier = Modifier.padding(20.dp)) {
+            // Switch Vibración
+            var vibState by remember { mutableStateOf(false) }
+            ControlSwitch(text = "Vibración", checked = vibState) { vibState = it }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Switch Alertas
+            var ttsState by remember { mutableStateOf(false) }
+            ControlSwitch(text = "Solo leer alertas importantes", checked = ttsState) { ttsState = it }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Text(
+                text = "Indicaciones",
+                color = Color.White,
+                fontSize = 22.sp,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        }
+
+        // 4. CÁMARA + CAPA YOLO (Box permite poner cosas encima de otras)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f) // Ocupa todo el espacio restante abajo
+        ) {
+            if (hasCameraPermission) {
+                CameraPreview()
+            } else {
+                Text("Se requiere permiso de cámara", color = Color.White, modifier = Modifier.align(Alignment.Center))
+            }
+
+            // --- AQUÍ IRÁ TU CAPA YOLO (Overlay) ---
+            // Por ahora es una caja transparente lista para pintar
+            // Cuando tengas tu clase "Overlay", la pondrás aquí.
+            // AndroidView(factory = { context -> Overlay(context) ... })
+        }
+    }
+}
+
+// Composable auxiliar para los Switches
+@Composable
+fun ControlSwitch(text: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = 18.sp
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = SmartPurpleHeader,
+                uncheckedThumbColor = Color.LightGray,
+                uncheckedTrackColor = Color.Gray
+            )
+        )
+    }
+}
+
+// Composable de la Cámara
+@Composable
+fun CameraPreview() {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    AndroidView(
+        factory = { ctx ->
+            val previewView = PreviewView(ctx)
+            val executor = ContextCompat.getMainExecutor(ctx)
+
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview
+                        // Aquí añadirás luego tu ImageAnalysis para YOLO
+                    )
+                } catch (e: Exception) {
+                    // Manejar error
+                }
+            }, executor)
+
+            previewView
+        },
+        modifier = Modifier.fillMaxSize()
+    )
 }
